@@ -3,6 +3,8 @@ from flask_cors import CORS
 from othello import OthelloGame
 from llm_handler import LLMHandler
 import traceback
+import time
+import os
 
 app = Flask(__name__)
 CORS(app, resources={
@@ -21,10 +23,25 @@ def start_game():
         if request.method == 'OPTIONS':
             return handle_options_request()
 
+        # APIキーの確認
+        required_keys = {
+            'gemini': 'GOOGLE_API_KEY',
+            'llama': 'HUGGINGFACE_API_KEY',
+            'dify': 'DIFY_API_KEY'
+        }
+
         data = request.json
-        game_id = str(len(games))
         llm1_type = data.get('player1')
         llm2_type = data.get('player2')
+
+        # 必要なAPIキーの確認
+        for llm_type in [llm1_type, llm2_type]:
+            if llm_type in required_keys:
+                key_name = required_keys[llm_type]
+                if not os.getenv(key_name):
+                    return jsonify({
+                        'error': f'Missing API key for {llm_type}. Please set {key_name} in .env file.'
+                    }), 400
         
         # LLMハンドラーの作成を試みる
         try:
@@ -35,11 +52,13 @@ def start_game():
                 'error': f"API key error: {str(e)}. Please check your .env file."
             }), 400
         
+        game_id = str(len(games))
         games[game_id] = {
             'game': OthelloGame(),
             'players': [player1, player2],
             'player_types': [llm1_type, llm2_type],
-            'consecutive_skips': 0
+            'consecutive_skips': 0,
+            'start_time': time.time()
         }
         
         return jsonify({
@@ -69,6 +88,11 @@ def make_move(game_id):
             winner = game.get_winner()
             score = game.get_score()
             
+            # ゲーム統計を収集
+            game_stats = game.get_game_stats()
+            game_stats['duration'] = time.time() - game_data['start_time']
+            
+            # 学習を実行
             LLMHandler.end_game(winner, game_data['player_types'])
             
             return jsonify({
@@ -76,7 +100,8 @@ def make_move(game_id):
                 'winner': winner,
                 'score': score,
                 'board': game.get_board_state(),
-                'playerTypes': game_data['player_types']
+                'playerTypes': game_data['player_types'],
+                'gameStats': game_stats
             })
         
         # パスが必要かチェック
@@ -86,6 +111,8 @@ def make_move(game_id):
                 # 両プレイヤーが連続でパスした場合、ゲーム終了
                 winner = game.get_winner()
                 score = game.get_score()
+                game_stats = game.get_game_stats()
+                game_stats['duration'] = time.time() - game_data['start_time']
                 
                 LLMHandler.end_game(winner, game_data['player_types'])
                 
@@ -94,7 +121,8 @@ def make_move(game_id):
                     'winner': winner,
                     'score': score,
                     'board': game.get_board_state(),
-                    'playerTypes': game_data['player_types']
+                    'playerTypes': game_data['player_types'],
+                    'gameStats': game_stats
                 })
             
             # パスして次のプレイヤーへ
@@ -116,7 +144,10 @@ def make_move(game_id):
         board_string = game.to_string()
         
         try:
+            # 手を取得（タイムアウト付き）
+            start_time = time.time()
             move = llm.get_move(board_string, valid_moves)
+            move_time = time.time() - start_time
             
             last_move = None
             if move:
@@ -134,7 +165,8 @@ def make_move(game_id):
                 'board': game.get_board_state(),
                 'currentPlayer': game.current_player,
                 'lastMove': last_move,
-                'playerTypes': game_data['player_types']
+                'playerTypes': game_data['player_types'],
+                'moveTime': round(move_time, 2)
             })
         
         except Exception as e:
@@ -157,13 +189,6 @@ def get_stats():
         print(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
-def handle_options_request():
-    response = jsonify({'status': 'ok'})
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type,Authorization'
-    response.headers['Access-Control-Allow-Methods'] = 'GET,PUT,POST,DELETE,OPTIONS'
-    return response
-
 @app.route('/api/check-keys', methods=['GET', 'OPTIONS'])
 def check_api_keys():
     try:
@@ -183,6 +208,13 @@ def check_api_keys():
     except Exception as e:
         print(f"Error checking API keys: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
+def handle_options_request():
+    response = jsonify({'status': 'ok'})
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type,Authorization'
+    response.headers['Access-Control-Allow-Methods'] = 'GET,PUT,POST,DELETE,OPTIONS'
+    return response
 
 @app.after_request
 def after_request(response):
